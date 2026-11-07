@@ -141,6 +141,7 @@ private:
   // TODO (apanicke): Replace the features with a class that has individual
   // fields.
   std::map<RawAddress, uint16_t> feature_map_;
+  std::map<RawAddress, int> sdp_busy_retries_;
 
   static ConnectionHandler* instance_;
 

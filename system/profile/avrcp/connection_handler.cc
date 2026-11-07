@@ -34,6 +34,7 @@
 #include "osi/include/properties.h"
 #include "packet/avrcp/avrcp_packet.h"
 #include "stack/include/avrc_defs.h"
+#include "stack/include/main_thread.h"
 #include "stack/include/bt_hdr.h"
 #include "stack/include/bt_uuid16.h"
 #include "stack/include/sdp_status.h"
@@ -184,7 +185,27 @@ bool ConnectionHandler::ConnectDevice(const RawAddress& bdaddr) {
     return;
   };
 
-  return SdpLookup(bdaddr, base::Bind(connection_lambda, this, bdaddr), false, false);
+  if (SdpLookup(bdaddr, base::Bind(connection_lambda, this, bdaddr), false, false)) {
+    sdp_busy_retries_.erase(bdaddr);
+    return true;
+  }
+  // Only one AVRCP SDP query can run at a time.
+  constexpr int kMaxSdpBusyRetries = 10;
+  if (sdp_busy_retries_[bdaddr]++ < kMaxSdpBusyRetries) {
+    log::warn("AVRCP SDP busy, retrying connection to {}", bdaddr);
+    do_in_main_thread_delayed(base::BindOnce(
+                                      [](base::WeakPtr<ConnectionHandler> handler,
+                                         RawAddress address) {
+                                        if (handler) {
+                                          handler->ConnectDevice(address);
+                                        }
+                                      },
+                                      weak_ptr_factory_.GetWeakPtr(), bdaddr),
+                              std::chrono::milliseconds(500));
+    return true;
+  }
+  sdp_busy_retries_.erase(bdaddr);
+  return false;
 }
 
 bool ConnectionHandler::DisconnectDevice(const RawAddress& bdaddr) {
@@ -246,10 +267,14 @@ bool ConnectionHandler::SdpLookup(const RawAddress& bdaddr, SdpCallback cb, bool
     }
   }
 
-  return avrc_->FindService(UUID_SERVCLASS_AV_REMOTE_CONTROL, bdaddr, &db_params,
-                            base::Bind(&ConnectionHandler::SdpCb, weak_ptr_factory_.GetWeakPtr(),
-                                       bdaddr, cb, disc_db, retry, incoming_connection)) ==
-         AVRC_SUCCESS;
+  if (avrc_->FindService(UUID_SERVCLASS_AV_REMOTE_CONTROL, bdaddr, &db_params,
+                         base::Bind(&ConnectionHandler::SdpCb, weak_ptr_factory_.GetWeakPtr(),
+                                    bdaddr, cb, disc_db, retry, incoming_connection)) !=
+      AVRC_SUCCESS) {
+    osi_free(disc_db);
+    return false;
+  }
+  return true;
 }
 
 bool ConnectionHandler::AvrcpConnect(bool initiator, const RawAddress& bdaddr) {
