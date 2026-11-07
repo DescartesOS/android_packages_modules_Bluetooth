@@ -162,8 +162,13 @@ void Device::VendorPacketHandler(uint8_t label, std::shared_ptr<VendorPacket> pk
         }
 
         set_vol_cmd_in_progress_ = false;
+        std::optional<int8_t> pending = pending_volume_;
+        pending_volume_.reset();
 
         if (pkt->GetCType() == CType::REJECTED) {
+          if (pending.has_value()) {
+            SetVolume(pending.value());
+          }
           return;
         }
         auto set_vol = Packet::Specialize<SetAbsoluteVolumeResponse>(pkt);
@@ -172,14 +177,14 @@ void Device::VendorPacketHandler(uint8_t label, std::shared_ptr<VendorPacket> pk
         log::info("SET_ABSOLUTE_VOLUME label: {}, volume_: {}, last vol: {}", label, volume_, vol);
         if (volume_ != vol) {
           volume_ = vol;
-          if (pending_volume_.has_value()) {
-            log::info("Set pending volume with {}", pending_volume_.value());
-            SetVolume(pending_volume_.value());
-          } else if (volume_interface_ != nullptr) {
+          if (!pending.has_value() && volume_interface_ != nullptr) {
             volume_interface_->SetVolume(volume_);
           }
         }
-        pending_volume_.reset();
+        if (pending.has_value()) {
+          log::info("Set pending volume with {}", pending.value());
+          SetVolume(pending.value());
+        }
         break;
       }
       default:
@@ -564,7 +569,9 @@ void Device::HandleVolumeChanged(uint8_t label,
                                  const std::shared_ptr<RegisterNotificationResponse>& pkt) {
   log::verbose("interim={}", pkt->IsInterim());
 
-  pending_volume_.reset();
+  if (!set_vol_cmd_in_progress_) {
+    pending_volume_.reset();
+  }
 
   if (volume_interface_ == nullptr) {
     return;
@@ -633,13 +640,6 @@ void Device::HandleVolumeChanged(uint8_t label,
 void Device::SetVolume(int8_t volume) {
   // TODO (apanicke): Implement logic for Multi-AVRCP
   log::info("volume={}", (int)volume);
-  if (volume == volume_) {
-    log::warn("{}: Ignoring volume change same as current volume level", address_);
-    return;
-  }
-
-  volume_ = volume;
-
   bool use_returned_volume_flag = com_android_bluetooth_flags_use_returned_absolute_volume();
 
   if (use_returned_volume_flag) {
@@ -649,8 +649,18 @@ void Device::SetVolume(int8_t volume) {
       return;
     }
 
+    if (volume == volume_) {
+      log::warn("{}: Ignoring volume change same as current volume level", address_);
+      return;
+    }
+
     set_vol_cmd_in_progress_ = true;
+  } else if (volume == volume_) {
+    log::warn("{}: Ignoring volume change same as current volume level", address_);
+    return;
   }
+
+  volume_ = volume;
 
   auto request = SetAbsoluteVolumeRequestBuilder::MakeBuilder(volume);
 
